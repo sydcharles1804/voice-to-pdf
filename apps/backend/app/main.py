@@ -4,14 +4,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import recordings, transcriptions
+from app.routes import pdfs, sessions
 
 load_dotenv()
 
 app = FastAPI(
     title="Voice to PDF API",
-    version="0.1.0",
-    description="Convert voice recordings to PDF documents",
+    version="0.2.0",
+    description="Voice-driven PDF form-filling — powered by Supabase + FastAPI",
 )
 
 origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -24,15 +24,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(recordings.router, prefix="/api/recordings", tags=["recordings"])
-app.include_router(
-    transcriptions.router, prefix="/api/transcriptions", tags=["transcriptions"]
-)
+app.include_router(pdfs.router,     prefix="/pdfs",     tags=["pdfs"])
+app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
 
 
 @app.get("/")
 async def root() -> dict:
-    return {"message": "Voice to PDF API", "version": "0.1.0"}
+    return {"message": "Voice to PDF API", "version": "0.2.0"}
 
 
 @app.get("/health")
