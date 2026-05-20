@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.database import get_admin_client
+from app.services.transcript_extractor import extract_answers_from_transcript, save_extracted_answers
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -115,7 +116,7 @@ def _handle_call_ended(retell_call_id: str, call: dict) -> None:
     # Locate the session by the Retell call ID written at call-start time.
     session_res = (
         db.table("sessions")
-        .select("id, status, pdf_id")
+        .select("id, status, pdf_id, user_id")
         .eq("retell_call_id", retell_call_id)
         .single()
         .execute()
@@ -128,30 +129,40 @@ def _handle_call_ended(retell_call_id: str, call: dict) -> None:
 
     session_id = session_res.data["id"]
     pdf_id     = session_res.data["pdf_id"]
+    user_id    = session_res.data["user_id"]
 
-    # Store the full transcript regardless of completion status.
+    # ── Store the full transcript ─────────────────────────────────────────────
     transcript_object = call.get("transcript_object") or []
     transcript_text   = call.get("transcript") or ""
 
     db.table("sessions").update({
-        "call_transcript":        transcript_object,  # structured — used for review screen
-        "call_transcript_text":   transcript_text,    # plain text — used for search / display
+        "call_transcript":      transcript_object,
+        "call_transcript_text": transcript_text,
     }).eq("id", session_id).execute()
 
-    logger.info(
-        "Transcript stored | session=%s turns=%d", session_id, len(transcript_object)
-    )
+    logger.info("Transcript stored | session=%s turns=%d", session_id, len(transcript_object))
 
-    # Only auto-complete if the session is still active (not already completed/abandoned).
+    # Only proceed if the session is still active.
     if session_res.data["status"] != "active":
         return
 
-    # Check whether all required fields are answered.
+    # ── Stage 1+2: Extract and save answers from the transcript ───────────────
     pdf_res = (
         db.table("pdfs").select("fields").eq("id", pdf_id).single().execute()
     )
     fields: list[dict] = (pdf_res.data or {}).get("fields") or []
-    required_names     = {f["name"] for f in fields if f.get("required", False)}
+
+    if fields and transcript_object:
+        try:
+            extracted = extract_answers_from_transcript(transcript_object, fields)
+            save_extracted_answers(db, session_id, user_id, extracted, fields)
+        except Exception as exc:
+            logger.error(
+                "Transcript extraction failed | session=%s error=%s", session_id, exc
+            )
+
+    # ── Check required fields after extraction ────────────────────────────────
+    required_names = {f["name"] for f in fields if f.get("required", False)}
 
     answers_res = (
         db.table("field_answers")
@@ -164,12 +175,12 @@ def _handle_call_ended(retell_call_id: str, call: dict) -> None:
     unanswered_required = required_names - answered_names
     if unanswered_required:
         logger.info(
-            "Call ended with unanswered required fields | session=%s missing=%s",
+            "Required fields still missing after extraction | session=%s missing=%s",
             session_id, unanswered_required,
         )
-        return  # Session stays active — user can complete via web form
+        return  # Session stays active — user can fill remaining fields via web form
 
-    # All required fields answered — mark completed and enqueue render.
+    # ── All required fields answered — complete and enqueue render ─────────────
     db.table("sessions").update({
         "status":       "completed",
         "pdf_status":   "pending",
