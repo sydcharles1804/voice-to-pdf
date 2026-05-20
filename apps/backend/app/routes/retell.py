@@ -94,6 +94,7 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str) -> None:
                 reply = _generate_reply(db, session_id, user_message)
 
                 await websocket.send_json({
+                    "response_type":    "response",
                     "response_id":      response_id,
                     "content":          reply,
                     "content_complete": True,

@@ -9,7 +9,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import pdfs, retell, sessions
+from app.routes import pdfs, retell, sessions, webhook
 
 app = FastAPI(
     title="Voice to PDF API",
@@ -29,7 +29,8 @@ app.add_middleware(
 
 app.include_router(pdfs.router,     prefix="/pdfs",     tags=["pdfs"])
 app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
-app.include_router(retell.router, prefix="/retell-llm-websocket", tags=["retell"])
+app.include_router(retell.router,   prefix="/retell-llm-websocket", tags=["retell"])
+app.include_router(webhook.router,  prefix="/webhook",              tags=["webhook"])
 
 
 @app.get("/")
