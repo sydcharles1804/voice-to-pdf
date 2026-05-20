@@ -1,3 +1,4 @@
+import logging
 import uuid
 from pathlib import Path
 
@@ -5,7 +6,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.auth import get_current_user
 from app.database import get_admin_client, get_client
+
+logger = logging.getLogger(__name__)
 from app.models import ApiResponse, PDFUploadResponse
+from app.services.field_schema import build_field_schema
 from app.services.pdf_extractor import (
     MAX_BYTES,
     extract_fields,
@@ -64,16 +68,38 @@ async def upload_pdf(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    # ── 4. Field extraction ───────────────────────────────────────────────────
+    # ── 4. Field extraction + schema build ───────────────────────────────────
+    # extract_fields does the expensive PyMuPDF + pdfplumber work.
+    # build_field_schema reshapes the result into the canonical schema and
+    # assigns stable UUIDs.  This runs once here and is stored in the DB —
+    # session routes and the AI agent read the stored schema, never re-extract.
     try:
-        page_count, fields = extract_fields(content)
+        page_count, raw_fields = extract_fields(content)
     except Exception as exc:
+        logger.warning("PDF field extraction failed | error=%s", exc)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Could not parse PDF structure: {exc}",
+            detail="Could not parse this PDF. The file may be corrupted or password-protected.",
+        )
+    fields = build_field_schema(raw_fields)
+
+    # ── 5. Reject scanned / non-fillable PDFs ────────────────────────────────
+    # AcroForm field count of zero means the PDF is either a scanned image or a
+    # flat (print-only) document.  We surface a clear error here rather than
+    # storing an empty schema and confusing the voice-fill flow.
+    # v2 will add an OCR fallback (Adobe PDF Extract / Google Document AI) to
+    # detect visual form fields in scanned PDFs.
+    if not fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "This PDF doesn't have fillable fields. "
+                "Only PDFs with interactive AcroForm fields are supported. "
+                "If this is a scanned document, try a version with fillable fields."
+            ),
         )
 
-    # ── 5. Build storage path and upload ─────────────────────────────────────
+    # ── 6. Build storage path and upload ─────────────────────────────────────
     # Convention: {user_id}/{pdf_id}.pdf  — user_id prefix lets storage RLS
     # (storage.foldername check) enforce ownership even without service role.
     pdf_id = str(uuid.uuid4())
@@ -91,13 +117,22 @@ async def upload_pdf(
             file=content,
             file_options={"content-type": "application/pdf"},
         )
+    except RuntimeError as exc:
+        # get_admin_client() raises RuntimeError when the service-role key is missing.
+        # Do not forward the message — it names internal env vars.
+        logger.error("Storage upload aborted — admin client unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF storage is not available. Please contact support.",
+        )
     except Exception as exc:
+        logger.error("Storage upload failed | path=%s error=%s", storage_path, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Storage upload failed: {exc}",
+            detail="PDF storage failed. Please try again.",
         )
 
-    # ── 6. Persist metadata via user-scoped client (RLS applies) ─────────────
+    # ── 7. Persist metadata via user-scoped client (RLS applies) ─────────────
     try:
         db = get_client(ctx["token"])
         pdf_res = (
@@ -116,6 +151,7 @@ async def upload_pdf(
             .execute()
         )
     except Exception as exc:
+        logger.error("DB insert failed | pdf_id=%s error=%s", pdf_id, exc)
         # Best-effort: remove the orphaned storage object so we don't leak files.
         try:
             get_admin_client().storage.from_(_BUCKET).remove([storage_path])
@@ -123,7 +159,7 @@ async def upload_pdf(
             pass
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database insert failed: {exc}",
+            detail="Failed to save PDF metadata. Please try again.",
         )
 
     return {

@@ -1,68 +1,76 @@
-"""Fill AcroForm fields in a PDF template with user-provided answers.
+"""Fill AcroForm fields in a PDF template and flatten the result.
+
+Uses PyMuPDF (fitz) throughout:
+  - Widget value assignment via widget.field_value + widget.update()
+  - doc.bake() to flatten: burns every widget's appearance into the page
+    content stream so the filled values become permanent, non-editable text.
 
 Kept separate from the Celery task so it can be tested without a broker.
 """
 
 import io
 
-from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, NameObject
+import fitz  # PyMuPDF
 
-# Values callers might provide for a checkbox field that means "checked".
 _TRUTHY = {"yes", "true", "1", "on", "checked", "x"}
 
 
-def _normalise_checkbox(value: str) -> str:
-    """Map human answers ('yes', 'true', …) to the PDF spec value '/Yes'."""
-    return "/Yes" if value.strip().lower() in _TRUTHY else "/Off"
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in _TRUTHY
 
 
 def fill_pdf(template_bytes: bytes, answers: dict[str, str]) -> bytes:
-    """Write answer values into a PDF template's AcroForm fields.
+    """Write answer values into a PDF template's AcroForm fields, then flatten.
 
     Args:
         template_bytes: Raw bytes of the original PDF template.
         answers:        Mapping of AcroForm field name → answer string.
-                        Checkbox fields are normalised automatically.
+                        Fields absent from ``answers`` are left at their
+                        default (usually blank).
 
     Returns:
-        Filled PDF as raw bytes, ready to upload to storage.
+        Filled, flattened PDF as raw bytes ready to upload to storage.
+        The returned PDF has no interactive form fields — every value is
+        rendered as ordinary page content.
 
-    Notes:
-        - Fields absent from ``answers`` are left blank.
-        - Checkboxes receive '/Yes' or '/Off' regardless of case/phrasing.
-        - ``auto_regenerate=False`` tells pypdf not to create new field
-          widgets; we only update existing ones.
-        - We call set_need_appearances_writer() so the filled values render
-          correctly in PDF viewers that rely on the /NeedAppearances flag.
+    Checkbox handling:
+        ``widget.on_state()`` returns the PDF's own export value for the
+        checked state (usually "Yes" or "On" but varies by producer).
+        We prefer this over hard-coding "/Yes" so the PDF viewer's
+        appearance stream matches what the spec expects.
     """
-    reader = PdfReader(io.BytesIO(template_bytes))
-    writer = PdfWriter()
-    writer.append(reader)
+    doc = fitz.open(stream=template_bytes, filetype="pdf")
 
-    # Build the normalised field map once — field type lookup from the reader.
-    raw_fields = reader.get_fields() or {}
-    normalised: dict[str, str] = {}
-    for name, answer in answers.items():
-        field = raw_fields.get(name, {})
-        ft = str(field.get("/FT", "/Tx"))
-        if ft == "/Btn":
-            normalised[name] = _normalise_checkbox(answer)
-        else:
-            normalised[name] = answer
+    for page in doc:
+        for widget in (page.widgets() or []):
+            name = widget.field_name
+            if name not in answers:
+                continue
 
-    # update_page_form_field_values operates per-page; call it on every page so
-    # multi-page PDFs have all their fields filled regardless of field location.
-    for page in writer.pages:
-        writer.update_page_form_field_values(
-            page,
-            normalised,
-            auto_regenerate=False,
-        )
+            raw = answers[name]
 
-    # Signal to PDF viewers that appearance streams need regenerating.
-    writer.set_need_appearances_writer()
+            if widget.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
+                if _is_truthy(raw):
+                    # on_state() returns the PDF's own "checked" export value.
+                    try:
+                        widget.field_value = widget.on_state()
+                    except (AttributeError, TypeError):
+                        widget.field_value = "Yes"
+                else:
+                    widget.field_value = "Off"
+            else:
+                # Text, dropdown, radio button, and everything else:
+                # set the value directly and let the PDF producer render it.
+                widget.field_value = raw
 
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
+            widget.update()
+
+    # Flatten: convert all widget appearance streams into static page content.
+    # After bake() the document contains no AcroForm widgets — values are
+    # burned in as graphics and cannot be edited by a PDF viewer.
+    doc.bake()
+
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True)
+    doc.close()
+    return buf.getvalue()

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_BUCKET  = "pdf-templates"
 _OUTPUT_BUCKET    = "completed-pdfs"
+_SIGNED_URL_TTL   = 86_400  # 24 hours in seconds
 
 
 def _set_pdf_status(session_id: str, pdf_status: str) -> None:
@@ -121,6 +122,23 @@ def render_pdf(self: Task, session_id: str) -> dict:
             file_options={"content-type": "application/pdf", "upsert": "true"},
         )
 
+        # ── Generate 24-hour signed download URL ─────────────────────────────
+        # The signed URL is the link we hand to the user.  We store the raw
+        # storage path in output_path (permanent) and derive a fresh signed URL
+        # on every GET /sessions/:id request so it never goes stale.
+        # We also generate one here to log it and confirm the upload succeeded.
+        try:
+            url_res = admin.storage.from_(_OUTPUT_BUCKET).create_signed_url(
+                output_path, _SIGNED_URL_TTL
+            )
+            signed_url = url_res.get("signedURL") or url_res.get("signedUrl") or ""
+            # Log only that a URL was generated — never log the URL itself, as
+            # signed URLs are time-limited tokens that grant unauthenticated access.
+            logger.info("render_pdf signed URL generated | session=%s", session_id)
+        except Exception as exc:
+            logger.warning("Could not generate signed URL | session=%s error=%s", session_id, exc)
+            signed_url = ""
+
         # ── Persist result ───────────────────────────────────────────────────
         admin.table("sessions").update({
             "pdf_status":  "done",
@@ -128,7 +146,7 @@ def render_pdf(self: Task, session_id: str) -> dict:
         }).eq("id", session_id).execute()
 
         logger.info("render_pdf done | session=%s output=%s", session_id, output_path)
-        return {"session_id": session_id, "output_path": output_path}
+        return {"session_id": session_id, "output_path": output_path, "signed_url": signed_url}
 
     except Exception as exc:
         logger.error("render_pdf error | session=%s attempt=%d error=%s",

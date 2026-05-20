@@ -21,12 +21,22 @@ class User(BaseModel):
     updated_at: datetime
 
 
-class PDFField(BaseModel):
-    name: str
-    type: str                        # text | checkbox | dropdown | signature
-    label: str
+class FieldCoords(BaseModel):
+    x: Optional[float] = None        # left edge in PDF points (72 pt = 1 inch)
+    y: Optional[float] = None        # top edge in PDF points
+    width: Optional[float] = None
+    height: Optional[float] = None
+
+
+class FieldSchema(BaseModel):
+    id: str                          # stable UUID assigned at upload time
+    name: str                        # AcroForm internal key (/T)
+    label: str                       # resolved human label
+    type: str                        # text | checkbox | radiobutton | dropdown | signature
     required: bool = False
-    options: list[str] = []          # non-empty for dropdown fields
+    options: list[str] = []          # non-empty for dropdown fields only
+    pageNumber: int = 1              # 1-indexed page number
+    coords: FieldCoords = FieldCoords()
 
 
 class PDF(BaseModel):
@@ -38,7 +48,7 @@ class PDF(BaseModel):
     file_size: Optional[int] = None
     page_count: Optional[int] = None
     field_count: Optional[int] = None
-    fields: list[PDFField] = []
+    fields: list[FieldSchema] = []
     created_at: datetime
     updated_at: datetime
 
@@ -46,7 +56,7 @@ class PDF(BaseModel):
 class PDFUploadResponse(BaseModel):
     pdf_id: str
     field_count: int
-    fields: list[PDFField]
+    fields: list[FieldSchema]
 
 
 class Session(BaseModel):
@@ -56,8 +66,10 @@ class Session(BaseModel):
     status: SessionStatus
     pdf_status: Optional[PDFRenderStatus] = None  # None until session is completed
     output_path: Optional[str] = None
+    download_url: Optional[str] = None            # 24-hour signed URL, injected on GET (not stored in DB)
     fields_total: Optional[int] = None
     fields_answered: int = 0
+    skipped_fields: list[str] = []
     started_at: datetime
     completed_at: Optional[datetime] = None
     created_at: datetime
@@ -78,7 +90,7 @@ class FieldAnswer(BaseModel):
     updated_at: datetime
 
 
-# ─── Request bodies ────────────────────────────────────────────────────────────
+# ─── Request / response bodies ────────────────────────────────────────────────
 
 class CreateSessionRequest(BaseModel):
     pdf_id: UUID
@@ -94,6 +106,30 @@ class SubmitAnswerRequest(BaseModel):
 
 class CompleteSessionRequest(BaseModel):
     output_path: Optional[str] = None
+
+
+class SkipFieldRequest(BaseModel):
+    field_name: str                       # must match a FieldSchema.name in the session's PDF
+
+
+class ChatRequest(BaseModel):
+    message: str                          # the user's current transcribed message
+
+
+class ChatResponse(BaseModel):
+    reply: str                            # AI assistant's text reply
+
+
+class ExtractRequest(BaseModel):
+    field_name: str                       # must match a FieldSchema.name in the session's PDF
+    transcript: str                       # raw speech-to-text from the user
+
+
+class MapResult(BaseModel):
+    value: Optional[str] = None           # normalized value, ready to pass to POST /answer
+    confidence: float = Field(ge=0, le=1)
+    needs_clarification: bool             # if True, ask the user to rephrase before saving
+    clarification_hint: Optional[str] = None  # friendly follow-up question for the user
 
 
 # ─── Compound response ─────────────────────────────────────────────────────────
