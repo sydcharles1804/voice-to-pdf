@@ -1,12 +1,15 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Must run before any app.* imports — database.py reads env vars at module level.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import pdfs, retell, sessions
-
-load_dotenv()
 
 app = FastAPI(
     title="Voice to PDF API",
@@ -26,7 +29,7 @@ app.add_middleware(
 
 app.include_router(pdfs.router,     prefix="/pdfs",     tags=["pdfs"])
 app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
-app.include_router(retell.router,   tags=["retell"])   # WebSocket has no prefix — URL is /retell-llm-websocket
+app.include_router(retell.router, prefix="/retell-llm-websocket", tags=["retell"])
 
 
 @app.get("/")

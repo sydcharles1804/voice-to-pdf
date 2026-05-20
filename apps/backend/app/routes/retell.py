@@ -34,13 +34,14 @@ _AGENT_FIRST_TRIGGER = (
 )
 
 
-@router.websocket("/retell-llm-websocket")
-async def retell_llm_websocket(websocket: WebSocket) -> None:
+@router.websocket("/{call_id}")
+async def retell_llm_websocket(websocket: WebSocket, call_id: str) -> None:
     """Retell Custom LLM WebSocket handler.
 
-    Retell connects once per call.  All turns of the call flow through this
-    single persistent connection.  The handler is stateless between calls —
-    all state lives in the DB.
+    Retell connects to {base_url}/{call_id} for every call.
+    The call_id comes from the path; session_id comes from call_details.
+    All turns of the call flow through this single persistent connection.
+    The handler is stateless between calls — all state lives in the DB.
     """
     await websocket.accept()
 
