@@ -72,6 +72,7 @@ export interface Session {
   fieldsTotal?: number;
   fieldsAnswered: number;
   skippedFields: string[];   // field names the user explicitly skipped
+  retellCallId?: string;     // set when a voice call is started via POST /sessions/:id/start-call
   startedAt: string;
   completedAt?: string;
   createdAt: string;
@@ -95,6 +96,13 @@ export interface FieldAnswer {
 export interface SessionDetail {
   session: Session;
   answers: FieldAnswer[];
+}
+
+export interface StartCallResponse {
+  /** Pass to RetellWebClient.startCall() — valid for 30 seconds only, do not store. */
+  access_token: string;
+  /** Persist client-side; also stored in sessions.retell_call_id for webhook correlation. */
+  call_id: string;
 }
 
 export interface SkipFieldRequest {

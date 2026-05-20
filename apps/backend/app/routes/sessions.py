@@ -7,6 +7,8 @@ from app.auth import get_current_user
 from app.database import get_admin_client, get_client
 
 logger = logging.getLogger(__name__)
+import os
+
 from app.models import (
     ApiResponse,
     ChatRequest,
@@ -19,6 +21,7 @@ from app.models import (
     Session,
     SessionDetail,
     SkipFieldRequest,
+    StartCallResponse,
     SubmitAnswerRequest,
 )
 from app.services.ai_agent import chat as ai_chat
@@ -202,6 +205,94 @@ async def submit_answer(
         ).eq("id", session_id).execute()
 
     return {"data": answer_res.data[0], "message": "Answer recorded", "success": True}
+
+
+# ─── POST /sessions/:id/start-call ───────────────────────────────────────────
+
+@router.post("/{session_id}/start-call", response_model=ApiResponse[StartCallResponse])
+async def start_retell_call(
+    session_id: str,
+    ctx: dict = Depends(get_current_user),
+) -> dict:
+    """Create a Retell web call and return the short-lived access token.
+
+    The access token must be passed to RetellWebClient.startCall() within
+    30 seconds or Retell invalidates it.  The call_id is persisted on the
+    session row so webhook events can be correlated later.
+
+    The session_id and pdf_id are injected as retell_llm_dynamic_variables so
+    the Custom LLM WebSocket handler knows which session context to load.
+    """
+    _api_key   = os.getenv("RETELL_API_KEY")
+    _agent_id  = os.getenv("RETELL_AGENT_ID")
+
+    if not _api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Voice call service is not configured. Please contact support.",
+        )
+    if not _agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Voice agent is not configured. Please contact support.",
+        )
+
+    db = get_client(ctx["token"])
+
+    session_res = (
+        db.table("sessions")
+        .select("id, status, pdf_id")
+        .eq("id", session_id)
+        .single()
+        .execute()
+    )
+    if not session_res.data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session_res.data["status"] != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session is '{session_res.data['status']}' — voice calls only available for active sessions",
+        )
+
+    pdf_id = session_res.data["pdf_id"]
+
+    try:
+        from retell import Retell
+        retell_client = Retell(api_key=_api_key)
+        web_call = retell_client.call.create_web_call(
+            agent_id=_agent_id,
+            retell_llm_dynamic_variables={
+                "session_id": session_id,
+                "pdf_id":     pdf_id,
+            },
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Voice call service is not available. Please contact support.",
+        )
+    except Exception as exc:
+        logger.error("Retell createWebCall failed | session=%s error=%s", session_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to start voice call. Please try again.",
+        )
+
+    # Persist the call_id so webhook events can find this session later.
+    db.table("sessions").update(
+        {"retell_call_id": web_call.call_id}
+    ).eq("id", session_id).execute()
+
+    logger.info("Retell call created | session=%s call_id=%s", session_id, web_call.call_id)
+
+    return {
+        "data": {
+            "access_token": web_call.access_token,
+            "call_id":      web_call.call_id,
+        },
+        "message": "Voice call created",
+        "success": True,
+    }
 
 
 # ─── POST /sessions/:id/skip ─────────────────────────────────────────────────

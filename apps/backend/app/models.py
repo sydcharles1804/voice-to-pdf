@@ -70,6 +70,7 @@ class Session(BaseModel):
     fields_total: Optional[int] = None
     fields_answered: int = 0
     skipped_fields: list[str] = []
+    retell_call_id: Optional[str] = None
     started_at: datetime
     completed_at: Optional[datetime] = None
     created_at: datetime
@@ -106,6 +107,11 @@ class SubmitAnswerRequest(BaseModel):
 
 class CompleteSessionRequest(BaseModel):
     output_path: Optional[str] = None
+
+
+class StartCallResponse(BaseModel):
+    access_token: str   # pass to RetellWebClient.startCall() — valid for 30 seconds only
+    call_id: str        # store client-side to link events; also persisted in sessions.retell_call_id
 
 
 class SkipFieldRequest(BaseModel):
