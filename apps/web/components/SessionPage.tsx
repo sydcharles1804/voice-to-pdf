@@ -8,6 +8,7 @@ import { VoiceCallButton } from "@/components/VoiceCallButton";
 import { createClient } from "@/lib/supabase";
 
 type Stage = "loading" | "auth" | "setup" | "session";
+type UploadState = "idle" | "uploading" | "starting";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -15,12 +16,13 @@ export function SessionPage() {
   const supabase                          = createClient();
   const [stage, setStage]                 = useState<Stage>("loading");
   const [authToken, setAuthToken]         = useState<string | null>(null);
-  const [pdfId, setPdfId]                 = useState("");
   const [sessionId, setSessionId]         = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
-  const [creating, setCreating]           = useState(false);
+  const [pdfName, setPdfName]             = useState<string | null>(null);
+  const [fieldCount, setFieldCount]       = useState<number | null>(null);
+  const [uploadState, setUploadState]     = useState<UploadState>("idle");
   const [error, setError]                 = useState<string | null>(null);
-  const pdfInputRef                       = useRef<HTMLInputElement>(null);
+  const fileInputRef                      = useRef<HTMLInputElement>(null);
 
   // ── Auth listener ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -49,37 +51,62 @@ export function SessionPage() {
     return () => subscription.unsubscribe();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Create session ─────────────────────────────────────────────────────────
-  async function handleStartSession() {
-    const id = pdfId.trim();
-    if (!id || !authToken) return;
+  // ── Upload PDF → create session ────────────────────────────────────────────
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !authToken) return;
 
-    setCreating(true);
     setError(null);
+    setUploadState("uploading");
 
     try {
-      const res = await fetch(`${API_BASE}/sessions/`, {
+      // Step 1: upload the PDF
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const uploadRes = await fetch(`${API_BASE}/pdfs/`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${authToken}` },
+        body: formData,
+      });
+
+      if (!uploadRes.ok) {
+        const body = await uploadRes.json().catch(() => ({}));
+        throw new Error(body?.detail ?? `Upload failed (HTTP ${uploadRes.status})`);
+      }
+
+      const { data: uploadData } = await uploadRes.json();
+      const pdfId: string = uploadData.pdf_id;
+
+      setUploadState("starting");
+
+      // Step 2: create the session
+      const sessionRes = await fetch(`${API_BASE}/sessions/`, {
         method: "POST",
         headers: {
           "Content-Type":  "application/json",
           "Authorization": `Bearer ${authToken}`,
         },
-        body: JSON.stringify({ pdf_id: id }),
+        body: JSON.stringify({ pdf_id: pdfId }),
       });
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail ?? `HTTP ${res.status}`);
+      if (!sessionRes.ok) {
+        const body = await sessionRes.json().catch(() => ({}));
+        throw new Error(body?.detail ?? `Session create failed (HTTP ${sessionRes.status})`);
       }
 
-      const { data } = await res.json();
-      setSessionId(data.id);
-      setSessionStatus(data.status);
+      const { data: sessionData } = await sessionRes.json();
+      setSessionId(sessionData.id);
+      setSessionStatus(sessionData.status);
+      setPdfName(file.name.replace(/\.pdf$/i, ""));
+      setFieldCount(uploadData.field_count);
       setStage("session");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create session");
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
-      setCreating(false);
+      setUploadState("idle");
+      // Reset input so the same file can be re-selected if needed
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -87,7 +114,7 @@ export function SessionPage() {
   async function handleSignOut() {
     await supabase.auth.signOut();
     setSessionId(null);
-    setPdfId("");
+    setPdfName(null);
     setStage("auth");
   }
 
@@ -123,11 +150,12 @@ export function SessionPage() {
   }
 
   if (stage === "setup") {
+    const busy = uploadState !== "idle";
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-50">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-sm border border-gray-100 p-8 flex flex-col gap-6">
           <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-gray-900">Start a Session</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Voice to PDF</h1>
             <button
               onClick={handleSignOut}
               className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
@@ -136,36 +164,54 @@ export function SessionPage() {
             </button>
           </div>
 
-          <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium text-gray-700">PDF ID</label>
-            <input
-              ref={pdfInputRef}
-              type="text"
-              value={pdfId}
-              onChange={(e) => setPdfId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleStartSession()}
-              placeholder="Paste a PDF ID from your uploads"
-              className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-            <p className="text-xs text-gray-400">
-              Upload a PDF first via <code className="bg-gray-100 px-1 rounded">POST /pdfs</code>,
-              then paste its ID here.
-            </p>
-          </div>
+          {/* Drop zone */}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => fileInputRef.current?.click()}
+            className={[
+              "relative flex flex-col items-center justify-center gap-3",
+              "w-full rounded-2xl border-2 border-dashed py-12 px-6 transition-colors",
+              busy
+                ? "border-blue-300 bg-blue-50 cursor-not-allowed"
+                : "border-gray-200 hover:border-blue-400 hover:bg-blue-50 cursor-pointer",
+            ].join(" ")}
+          >
+            {busy ? (
+              <>
+                <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm font-medium text-blue-600">
+                  {uploadState === "uploading" ? "Uploading PDF…" : "Starting session…"}
+                </p>
+              </>
+            ) : (
+              <>
+                <svg className="w-10 h-10 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                  />
+                </svg>
+                <div className="text-center">
+                  <p className="text-sm font-medium text-gray-700">Upload a PDF form</p>
+                  <p className="text-xs text-gray-400 mt-1">Click to browse · max 25 MB · fillable fields required</p>
+                </div>
+              </>
+            )}
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={handleFileChange}
+          />
 
           {error && (
             <p className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-2">
               {error}
             </p>
           )}
-
-          <button
-            onClick={handleStartSession}
-            disabled={creating || !pdfId.trim()}
-            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold rounded-xl transition-colors"
-          >
-            {creating ? "Creating session…" : "Start Session"}
-          </button>
         </div>
       </div>
     );
@@ -177,16 +223,20 @@ export function SessionPage() {
       <div className="w-full max-w-md bg-white rounded-2xl shadow-sm border border-gray-100 p-8 flex flex-col gap-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Form Session</h1>
-            <p className="text-xs text-gray-400 mt-0.5 font-mono truncate">
-              {sessionId}
-            </p>
+            <h1 className="text-2xl font-bold text-gray-900">
+              {pdfName ?? "Form Session"}
+            </h1>
+            {fieldCount !== null && (
+              <p className="text-xs text-gray-400 mt-0.5">
+                {fieldCount} fillable field{fieldCount !== 1 ? "s" : ""} detected
+              </p>
+            )}
           </div>
           <button
-            onClick={() => { setStage("setup"); setSessionId(null); setPdfId(""); }}
+            onClick={() => { setStage("setup"); setSessionId(null); setPdfName(null); }}
             className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
           >
-            New session
+            New form
           </button>
         </div>
 
