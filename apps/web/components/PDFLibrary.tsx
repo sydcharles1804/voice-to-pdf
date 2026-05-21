@@ -28,7 +28,7 @@ interface PDFItem {
 
 export interface PDFLibraryProps {
   authToken: string;
-  onSessionStart: (sessionId: string, pdfName: string, fieldCount: number) => void;
+  onSessionStart: (sessionId: string, pdfName: string, fieldCount: number, pdfId: string) => void;
   onSignOut: () => void;
 }
 
@@ -138,7 +138,7 @@ function PDFCard({ pdf, authToken, onSessionStart }: {
     try {
       const sessionId = await createSession(authToken, pdf.id);
       await qc.invalidateQueries({ queryKey: ["pdfs"] });
-      onSessionStart(sessionId, pdf.name, pdf.field_count ?? 0);
+      onSessionStart(sessionId, pdf.name, pdf.field_count ?? 0, pdf.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setStarting(false);
@@ -296,7 +296,7 @@ export function PDFLibrary({ authToken, onSessionStart, onSignOut }: PDFLibraryP
       // 2. Create session and navigate immediately
       const sessionId = await createSession(authToken, uploadData.pdf_id);
       await qc.invalidateQueries({ queryKey: ["pdfs"] });
-      onSessionStart(sessionId, file.name.replace(/\.pdf$/i, ""), uploadData.field_count ?? 0);
+      onSessionStart(sessionId, file.name.replace(/\.pdf$/i, ""), uploadData.field_count ?? 0, uploadData.pdf_id);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
       setUploading(false);

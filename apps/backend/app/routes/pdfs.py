@@ -67,6 +67,44 @@ async def list_pdfs(ctx: dict = Depends(get_current_user)) -> dict:
     return {"data": result, "message": f"{len(result)} PDF(s)", "success": True}
 
 
+@router.get(
+    "/{pdf_id}",
+    response_model=ApiResponse[dict],
+    summary="Get one PDF template — full field schema and signed URL",
+)
+async def get_pdf(pdf_id: str, ctx: dict = Depends(get_current_user)) -> dict:
+    """Return full PDF metadata including the fields array (with coords) and a
+    short-lived signed URL for the original template so the viewer can load it.
+    """
+    db = get_client(ctx["token"])
+
+    pdf_res = (
+        db.table("pdfs")
+        .select("id, name, original_name, storage_path, page_count, field_count, fields, created_at")
+        .eq("id", pdf_id)
+        .single()
+        .execute()
+    )
+    if not pdf_res.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PDF not found")
+
+    pdf = dict(pdf_res.data)
+
+    try:
+        url_res = get_admin_client().storage.from_(_BUCKET).create_signed_url(
+            pdf["storage_path"], 3_600
+        )
+        pdf["template_url"] = url_res.get("signedURL") or url_res.get("signedUrl")
+    except Exception as exc:
+        logger.warning("Template URL generation failed | pdf_id=%s error=%s", pdf_id, exc)
+        pdf["template_url"] = None
+
+    # Don't expose internal storage path to the client.
+    pdf.pop("storage_path", None)
+
+    return {"data": pdf, "message": "PDF retrieved", "success": True}
+
+
 @router.post(
     "/",
     response_model=ApiResponse[PDFUploadResponse],
