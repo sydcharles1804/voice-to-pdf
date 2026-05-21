@@ -62,10 +62,11 @@ function MessageBubble({ turn, index }: { turn: TranscriptTurn; index: number })
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 export function TranscriptPanel() {
-  const transcript  = useSessionStore(s => s.transcript);
-  const isActive    = useSessionStore(s => s.isCallActive);
-  const agentMode   = useSessionStore(s => s.agentMode);
-  const scrollRef   = useRef<HTMLDivElement>(null);
+  const transcript     = useSessionStore(s => s.transcript);
+  const isActive       = useSessionStore(s => s.isCallActive);
+  const agentMode      = useSessionStore(s => s.agentMode);
+  const clearTranscript = useSessionStore(s => s.clearTranscript);
+  const scrollRef      = useRef<HTMLDivElement>(null);
   const prevLenRef  = useRef(0);
 
   // Scroll to bottom when new message arrives.
@@ -85,6 +86,16 @@ export function TranscriptPanel() {
         <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
           Conversation
         </span>
+        <div className="flex items-center gap-3">
+        {transcript.length > 0 && (
+          <button
+            onClick={clearTranscript}
+            aria-label="Clear conversation"
+            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            Clear
+          </button>
+        )}
         {isActive && (
           <span className={[
             "inline-flex items-center gap-1.5 text-xs font-medium",
@@ -101,6 +112,7 @@ export function TranscriptPanel() {
             {agentMode === "speaking" ? "Speaking" : "Listening"}
           </span>
         )}
+        </div>
       </div>
 
       {/* Message list */}

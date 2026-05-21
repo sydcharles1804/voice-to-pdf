@@ -25,11 +25,12 @@ interface SessionStore {
   activePanel: "pdf" | "transcript";
 
   // ── Actions ───────────────────────────────────────────────────────────────
-  startCall:      (sessionId: string, apiBase: string, authToken: string) => Promise<void>;
-  stopCall:       () => void;
-  setActivePanel: (panel: "pdf" | "transcript") => void;
-  clearError:     () => void;
-  reset:          () => void;
+  startCall:       (sessionId: string, apiBase: string, authToken: string) => Promise<void>;
+  stopCall:        () => void;
+  setActivePanel:  (panel: "pdf" | "transcript") => void;
+  clearError:      () => void;
+  clearTranscript: () => void;
+  reset:           () => void;
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
@@ -92,8 +93,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set({ isCallActive: false, agentMode: "idle" });
   },
 
-  setActivePanel: (panel) => set({ activePanel: panel }),
-  clearError:     ()      => set({ error: null }),
+  setActivePanel:  (panel) => set({ activePanel: panel }),
+  clearError:      ()      => set({ error: null }),
+  clearTranscript: ()      => set({ transcript: [] }),
 
   reset: () => {
     _retellClient?.stopCall();

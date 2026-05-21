@@ -102,6 +102,7 @@ export function SessionPage() {
 
   // ── Callbacks ──────────────────────────────────────────────────────────────
   function handleSessionStart(sid: string, name: string, count: number, pid: string) {
+    resetCall();
     setSessionId(sid);
     setPdfName(name);
     setFieldCount(count);
