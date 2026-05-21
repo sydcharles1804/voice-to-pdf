@@ -20,6 +20,38 @@ from app.services.ai_agent import chat as ai_chat
 
 logger = logging.getLogger(__name__)
 
+# ── Spoken-digit normalizer ───────────────────────────────────────────────────
+# STT engines transcribe "2375621139" as "two three seven five six two one one
+# three nine".  Normalizing before the LLM call lets the extraction rules work
+# on numerals rather than prose.
+_DIGIT_WORDS: dict[str, str] = {
+    "zero": "0", "oh": "0",
+    "one": "1", "two": "2", "three": "3",
+    "four": "4", "five": "5", "six": "6",
+    "seven": "7", "eight": "8", "nine": "9",
+    # teens and tens — helpful for amounts / ages
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19",
+    "twenty": "20", "thirty": "30", "forty": "40", "fifty": "50",
+    "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+}
+
+
+def _normalize_digit_words(text: str) -> str:
+    """Replace spoken-digit words with numerals, leaving other words unchanged.
+
+    'two three seven five' → '2 3 7 5'
+    'fifty thousand'       → '50 thousand'   (LLM handles the rest)
+    'John Smith'           → 'John Smith'    (non-digit words untouched)
+    """
+    out = []
+    for token in text.split():
+        key = token.lower().rstrip(".,!?-")
+        out.append(_DIGIT_WORDS[key] if key in _DIGIT_WORDS else token)
+    return " ".join(out)
+
+
 # ── Type-specific extraction rules ────────────────────────────────────────────
 # Injected verbatim into the extraction prompt so the LLM knows the exact
 # output format required for each field type.
@@ -60,14 +92,14 @@ _LABEL_RULES: list[tuple[str, str]] = [
     ("date",    "Return in YYYY-MM-DD format (ISO 8601). If year is absent, set needsClarification."),
     ("dob",     "Date of birth — return in YYYY-MM-DD format. If year is absent, set needsClarification."),
     ("birth",   "Date of birth — return in YYYY-MM-DD format. If year is absent, set needsClarification."),
-    ("phone",   "Return as (XXX) XXX-XXXX. Normalize digits spoken individually: '5 5 5 1 2 3 4' → '(555) 123-4'."),
-    ("mobile",  "Return as (XXX) XXX-XXXX."),
-    ("fax",     "Return as (XXX) XXX-XXXX."),
+    ("phone",   "Return as (XXX) XXX-XXXX. Digits may be spoken individually as words or numerals ('two three seven' or '2 3 7') — join all digits and format as (XXX) XXX-XXXX."),
+    ("mobile",  "Return as (XXX) XXX-XXXX. Digits may arrive as individual words or numerals — join and format accordingly."),
+    ("fax",     "Return as (XXX) XXX-XXXX. Digits may arrive as individual words or numerals — join and format accordingly."),
     ("email",   "Return as name@domain.com. Lower-case the entire address."),
     ("zip",     "Return as a 5-digit string, zero-padded if needed."),
     ("postal",  "Return as a 5-digit string, zero-padded if needed."),
-    ("ssn",     "Return in XXX-XX-XXXX format. Treat digit groups spoken separately."),
-    ("ein",     "Return in XX-XXXXXXX format."),
+    ("ssn",     "Return in XXX-XX-XXXX format. Digits may be spoken as words or individually — collect all 9 digits and format XXX-XX-XXXX."),
+    ("ein",     "Return in XX-XXXXXXX format. Digits may be spoken as words — collect all digits and format XX-XXXXXXX."),
     ("amount",  "Return as a plain number without currency symbols or commas (e.g. '50000')."),
     ("salary",  "Return as a plain number without currency symbols or commas."),
     ("income",  "Return as a plain number without currency symbols or commas."),
@@ -247,7 +279,8 @@ def map_field(transcript: str, field: dict) -> dict[str, Any]:
     function returns a safe ``needs_clarification=True`` fallback so the
     caller can ask the user to repeat themselves.
     """
-    user_message = _build_user_message(transcript, field)
+    normalized   = _normalize_digit_words(transcript)
+    user_message = _build_user_message(normalized, field)
 
     try:
         raw_reply = ai_chat(

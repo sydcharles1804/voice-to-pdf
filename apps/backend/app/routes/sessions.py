@@ -259,6 +259,20 @@ async def start_retell_call(
     try:
         from retell import Retell
         retell_client = Retell(api_key=_api_key)
+
+        # Ensure agent speaks first — sets begin_message so Retell sends an
+        # initial response_required with empty transcript on call open.
+        try:
+            retell_client.agent.update(
+                agent_id=_agent_id,
+                begin_message=(
+                    "Hello! I'm your form-filling assistant. "
+                    "I'll guide you through each field one at a time. Let's get started!"
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Could not set begin_message on agent | error=%s", exc)
+
         web_call = retell_client.call.create_web_call(
             agent_id=_agent_id,
             retell_llm_dynamic_variables={
