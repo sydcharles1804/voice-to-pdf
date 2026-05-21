@@ -23,6 +23,50 @@ router = APIRouter()
 _BUCKET = "pdf-templates"
 
 
+@router.get(
+    "/",
+    response_model=ApiResponse[list[dict]],
+    summary="List the caller's PDF templates",
+)
+async def list_pdfs(ctx: dict = Depends(get_current_user)) -> dict:
+    """Return all PDFs uploaded by the current user, newest first.
+
+    Each item includes the most-recent session summary so the client can show
+    progress badges without a second round-trip.
+    """
+    db = get_client(ctx["token"])
+
+    pdfs_res = (
+        db.table("pdfs")
+        .select("id, name, original_name, page_count, field_count, created_at, updated_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    pdfs: list[dict] = pdfs_res.data or []
+
+    if pdfs:
+        pdf_ids = [p["id"] for p in pdfs]
+        sessions_res = (
+            db.table("sessions")
+            .select("id, pdf_id, status, fields_answered, fields_total, completed_at, created_at")
+            .in_("pdf_id", pdf_ids)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        # Keep only the most-recent session per PDF.
+        latest: dict[str, dict] = {}
+        for s in sessions_res.data or []:
+            pid = str(s["pdf_id"])
+            if pid not in latest:
+                latest[pid] = s
+
+        result = [{**p, "latest_session": latest.get(str(p["id"]))} for p in pdfs]
+    else:
+        result = []
+
+    return {"data": result, "message": f"{len(result)} PDF(s)", "success": True}
+
+
 @router.post(
     "/",
     response_model=ApiResponse[PDFUploadResponse],
