@@ -47,10 +47,13 @@ def build_field_schema(raw_fields: list[dict[str, Any]]) -> list[dict[str, Any]]
     """
     schema: list[dict[str, Any]] = []
     for field in raw_fields:
+        # Sanitize name and label — strip whitespace/tabs that come from PDF metadata
+        name  = " ".join(field["name"].split())
+        label = " ".join(field["label"].split()) if field.get("label") else name
         schema.append({
             "id":         str(uuid.uuid4()),
-            "name":       field["name"],
-            "label":      field["label"],
+            "name":       name,
+            "label":      label,
             "type":       field["type"],
             "required":   field["required"],
             "options":    field.get("options", []),

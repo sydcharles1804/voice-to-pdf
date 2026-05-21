@@ -14,12 +14,15 @@ turns so multiple concurrent calls are safe.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.database import get_admin_client
 from app.services.ai_agent import chat as ai_chat
 from app.services.conversation import append_turns, derive_cursor, load_history
+from app.services.field_mapper import map_field
 from app.services.prompt_builder import build_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -152,7 +155,7 @@ def _process_turn(db, session_id: str, user_message: str) -> str:
     # ── Load session ──────────────────────────────────────────────────────────
     session_res = (
         db.table("sessions")
-        .select("status, pdf_id, conversation_history, skipped_fields")
+        .select("status, pdf_id, user_id, conversation_history, skipped_fields")
         .eq("id", session_id)
         .single()
         .execute()
@@ -205,8 +208,12 @@ def _process_turn(db, session_id: str, user_message: str) -> str:
     # ── Call LLM ─────────────────────────────────────────────────────────────
     reply = ai_chat(system_prompt, messages)
 
+    # ── Mid-call answer saving ────────────────────────────────────────────────
+    # Save confirmed answers immediately so the next turn's prompt reflects them.
+    if user_message and current_field:
+        _try_save_answer(db, session_id, session_res.data.get("user_id", ""), user_message, current_field, reply)
+
     # ── Persist new turns (sliding window) ────────────────────────────────────
-    # Only save real user turns — don't pollute history with the synthetic trigger.
     if user_message:
         new_history = append_turns(
             history,
@@ -220,3 +227,56 @@ def _process_turn(db, session_id: str, user_message: str) -> str:
         ).eq("id", session_id).execute()
 
     return reply
+
+
+def _try_save_answer(
+    db, session_id: str, user_id: str,
+    user_message: str, field: dict, reply: str,
+) -> None:
+    """Save a confirmed answer mid-call if the LLM reply contains a confirmation.
+
+    Looks for "I'll record [value]" or "I'll update [label] to [value]" in the
+    reply. If found, runs the value through map_field() and upserts to field_answers.
+    """
+    # Match: "I'll record "X" for Y" or "I'll update Y to "X""
+    patterns = [
+        r"""I['']ll record ["“]?(.+?)["”]? for """,
+        r"""I['']ll update .+? to ["“]?(.+?)["”]?[.\n]""",
+        r"""recording ["“]?(.+?)["”]? for """,
+    ]
+    raw_value: str | None = None
+    for pattern in patterns:
+        m = re.search(pattern, reply, re.IGNORECASE)
+        if m:
+            raw_value = m.group(1).strip()
+            break
+
+    if not raw_value:
+        return
+
+    try:
+        result = map_field(transcript=raw_value, field=field)
+        if result["needs_clarification"] or result["value"] is None:
+            return
+
+        db.table("field_answers").upsert(
+            {
+                "session_id":     session_id,
+                "user_id":        user_id,
+                "field_name":     field["name"],
+                "field_label":    field.get("label") or field["name"],
+                "answer":         result["value"],
+                "raw_transcript": raw_value,
+                "confidence":     result["confidence"],
+                "answered_at":    datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="session_id,field_name",
+        ).execute()
+
+        logger.info(
+            "Mid-call answer saved | session=%s field=%s value=%s",
+            session_id, field["name"], result["value"],
+        )
+    except Exception as exc:
+        logger.warning("Mid-call answer save failed | session=%s field=%s error=%s",
+                       session_id, field["name"], exc)
