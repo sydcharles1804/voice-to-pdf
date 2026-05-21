@@ -20,7 +20,8 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-pdf": "^7",
-    "retell-client-js-sdk": "^2.0.4"
+    "retell-client-js-sdk": "^2.0.4",
+    "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@types/node": "^20",
