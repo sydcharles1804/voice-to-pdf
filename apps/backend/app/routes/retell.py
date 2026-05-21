@@ -44,38 +44,60 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str) -> None:
     The handler is stateless between calls — all state lives in the DB.
     """
     await websocket.accept()
-
-    # One admin client per call — reused across all turns.
-    db         = get_admin_client()
     session_id: str | None = None
+
+    try:
+        db = get_admin_client()
+    except Exception as exc:
+        logger.error("Retell WS: failed to get admin client — %s", exc)
+        await websocket.close(code=1011, reason="internal error")
+        return
+
+    # Resolve session_id from the call_id in the URL path.
+    logger.info("Retell WS: looking up session for call_id=%s", call_id)
+    try:
+        session_res = (
+            db.table("sessions")
+            .select("id")
+            .eq("retell_call_id", call_id)
+            .maybe_single()
+            .execute()
+        )
+        if session_res and session_res.data:
+            session_id = session_res.data["id"]
+            logger.info("Retell call connected | call=%s session=%s", call_id, session_id)
+        else:
+            logger.warning("Retell WS: no session found for call_id=%s — will wait for call_details", call_id)
+    except Exception as exc:
+        logger.warning("Retell WS: session lookup error for call_id=%s error=%s", call_id, exc)
 
     try:
         async for raw in websocket.iter_json():
             interaction_type: str = raw.get("interaction_type", "")
+            logger.debug("Retell WS message | type=%s session=%s", interaction_type, session_id)
 
-            # ── 1. call_details — first message, extract session context ──────
+            # ── 1. call_details — update session_id if not already resolved ──
             if interaction_type == "call_details":
-                dynamic_vars: dict = (
-                    (raw.get("call") or {}).get("retell_llm_dynamic_variables") or {}
-                )
-                session_id = dynamic_vars.get("session_id")
-
                 if not session_id:
-                    logger.warning("Retell WS: no session_id in dynamic_variables — closing")
-                    await websocket.close(code=1008, reason="session_id required")
-                    return
-
-                logger.info("Retell call connected | session=%s", session_id)
-                # No response needed for call_details — Retell will immediately
-                # send response_required if the agent speaks first.
+                    dynamic_vars: dict = (
+                        (raw.get("call") or {}).get("retell_llm_dynamic_variables") or {}
+                    )
+                    session_id = dynamic_vars.get("session_id")
+                    if session_id:
+                        logger.info("Retell call_details | session=%s", session_id)
+                    else:
+                        logger.warning("Retell WS: no session_id in call_details — closing")
+                        await websocket.close(code=1008, reason="session_id required")
+                        return
 
             # ── 2. response_required / reminder_required — generate LLM reply ─
             elif interaction_type in ("response_required", "reminder_required"):
                 if not session_id:
                     logger.warning(
-                        "Retell WS: %s before call_details — ignoring", interaction_type
+                        "Retell WS: %s with no session_id — closing", interaction_type
                     )
-                    continue
+                    await websocket.close(code=1008, reason="session_id required")
+                    return
 
                 response_id: int     = raw.get("response_id", 0)
                 transcript:  list    = raw.get("transcript") or []

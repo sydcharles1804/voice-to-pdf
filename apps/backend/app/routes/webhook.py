@@ -22,7 +22,9 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+import asyncio
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 
 from app.database import get_admin_client
 from app.services.transcript_extractor import extract_answers_from_transcript, save_extracted_answers
@@ -32,8 +34,11 @@ router = APIRouter()
 
 
 @router.post("/retell", status_code=status.HTTP_204_NO_CONTENT)
-async def retell_webhook(request: Request) -> Response:
+async def retell_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
     """Receive and process Retell call lifecycle events.
+
+    Returns 204 immediately — heavy processing (transcript extraction, PDF
+    render) runs in a background task so Retell's 10-second timeout is never hit.
 
     Uses the raw request body for signature verification — do NOT parse
     the body before verifying, or the HMAC will not match.
@@ -57,14 +62,11 @@ async def retell_webhook(request: Request) -> Response:
 
     logger.info("Retell webhook | event=%s call_id=%s", event, retell_call_id)
 
-    if event == "call_started":
-        pass  # Connection already logged by the WebSocket handler
-
-    elif event == "call_ended":
-        _handle_call_ended(retell_call_id, call)
+    if event == "call_ended":
+        background_tasks.add_task(_handle_call_ended, retell_call_id, call)
 
     elif event == "call_analyzed":
-        _handle_call_analyzed(retell_call_id, call)
+        background_tasks.add_task(_handle_call_analyzed, retell_call_id, call)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -75,22 +77,39 @@ def _verify_signature(raw_body: bytes, api_key: str, signature: str) -> bool:
     """Return True if x-retell-signature matches the expected HMAC-SHA256.
 
     Tries the Retell SDK's verify() first (authoritative), then falls back
-    to a manual HMAC so the endpoint works even if the SDK is unavailable.
+    to manual HMAC checks (base64 and hex) so the endpoint works regardless
+    of which format Retell is currently using.
+
+    Set RETELL_SKIP_SIGNATURE_CHECK=1 in .env to bypass during development.
     """
+    if os.getenv("RETELL_SKIP_SIGNATURE_CHECK") == "1":
+        logger.debug("Retell webhook: signature check skipped (dev mode)")
+        return True
+
     if not api_key or not signature:
         return False
 
     # Preferred: let the SDK handle the exact signature format.
     try:
         from retell import Retell  # noqa: PLC0415
-        return bool(Retell.verify(raw_body.decode("utf-8"), api_key, signature))
-    except (ImportError, AttributeError):
+        result = Retell.verify(raw_body.decode("utf-8"), api_key, signature)
+        return bool(result)
+    except (ImportError, AttributeError, Exception):
         pass
 
-    # Fallback: HMAC-SHA256, base64-encoded.
-    mac      = hmac.new(api_key.encode("utf-8"), raw_body, hashlib.sha256)
-    expected = base64.b64encode(mac.digest()).decode()
-    return hmac.compare_digest(expected, signature)
+    mac = hmac.new(api_key.encode("utf-8"), raw_body, hashlib.sha256)
+
+    # Try base64-encoded digest
+    expected_b64 = base64.b64encode(mac.digest()).decode()
+    if hmac.compare_digest(expected_b64, signature):
+        return True
+
+    # Try hex digest
+    expected_hex = mac.hexdigest()
+    if hmac.compare_digest(expected_hex, signature):
+        return True
+
+    return False
 
 
 # ── Event handlers ─────────────────────────────────────────────────────────────
@@ -189,12 +208,16 @@ def _handle_call_ended(retell_call_id: str, call: dict) -> None:
 
     try:
         from app.tasks.pdf_renderer import render_pdf  # noqa: PLC0415
-        render_pdf.delay(session_id)
-        logger.info("render_pdf enqueued from webhook | session=%s", session_id)
+        # Try Celery first; fall back to synchronous execution if Redis is unavailable.
+        try:
+            render_pdf.delay(session_id)
+            logger.info("render_pdf enqueued via Celery | session=%s", session_id)
+        except Exception:
+            render_pdf.apply(args=[session_id])
+            logger.info("render_pdf ran synchronously (no Celery) | session=%s", session_id)
     except Exception as exc:
         logger.error(
-            "Failed to enqueue render_pdf from webhook | session=%s error=%s",
-            session_id, exc,
+            "render_pdf failed | session=%s error=%s", session_id, exc,
         )
 
 
