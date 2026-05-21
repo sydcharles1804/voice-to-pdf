@@ -9,6 +9,7 @@ from app.database import get_admin_client, get_client
 
 logger = logging.getLogger(__name__)
 from app.models import ApiResponse, PDFUploadResponse
+from app.services.field_interpreter import apply_interpretation, interpret_fields
 from app.services.field_schema import build_field_schema
 from app.services.pdf_extractor import (
     MAX_BYTES,
@@ -82,6 +83,17 @@ async def upload_pdf(
             detail="Could not parse this PDF. The file may be corrupted or password-protected.",
         )
     fields = build_field_schema(raw_fields)
+
+    # ── 4b. LLM interpretation — clean labels + generate spoken questions ─────
+    # Runs once at upload time.  Failures are non-fatal: the agent falls back
+    # to the raw labels extracted from the PDF.
+    try:
+        interpretation = interpret_fields(fields)
+        if interpretation:
+            fields = apply_interpretation(fields, interpretation)
+            display_name = interpretation.get("form_type") or display_name
+    except Exception as exc:
+        logger.warning("Field interpretation skipped | error=%s", exc)
 
     # ── 5. Reject scanned / non-fillable PDFs ────────────────────────────────
     # AcroForm field count of zero means the PDF is either a scanned image or a

@@ -130,7 +130,10 @@ def build_system_prompt(
 
         hint = _format_hint(field)
 
-        lines = [f"{idx}. **{label}** [{tag}]"]
+        # Prefer LLM-cleaned label over raw PDF label
+        display_label = field.get("clean_label") or label
+
+        lines = [f"{idx}. **{display_label}** [{tag}]"]
         lines.append(f"   ID: `{name}` | page {page} | type: {ftype}")
         if hint:
             lines.append(f"   Format: {hint}")
@@ -158,9 +161,10 @@ def build_system_prompt(
 
     # ── Current-task section ──────────────────────────────────────────────────
     if current_field is not None:
-        cf_label = current_field.get("label") or current_field["name"]
-        cf_hint  = _format_hint(current_field)
-        cf_pos   = (
+        cf_label    = current_field.get("clean_label") or current_field.get("label") or current_field["name"]
+        cf_question = current_field.get("question")
+        cf_hint     = _format_hint(current_field)
+        cf_pos      = (
             f"field {current_field_index + 1} of {n_total}"
             if current_field_index is not None
             else f"of {n_total}"
@@ -169,6 +173,8 @@ def build_system_prompt(
             f"Ask about this field next: **{cf_label}** ({cf_pos}).",
             "Do not ask about any other field until this one is answered and confirmed.",
         ]
+        if cf_question:
+            task_lines.append(f"Speak this exact question: \"{cf_question}\"")
         if cf_hint:
             task_lines.append(f"Format guidance: {cf_hint}")
         current_task_section = "\n".join(task_lines)
